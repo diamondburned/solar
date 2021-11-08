@@ -1,8 +1,12 @@
 package solar
 
 import (
+	"fmt"
+	"math"
 	"testing"
 	"time"
+
+	_ "time/tzdata"
 )
 
 // Coordinates for Los Angeles, CA in degrees.
@@ -16,16 +20,19 @@ var losAngeles *time.Location
 func init() {
 	z, err := time.LoadLocation("America/Los_Angeles")
 	if err != nil {
-		panic("cannot load America/Los_Angeles: " + err.Error())
+		panic("cannot load embedded America/Los_Angeles: " + err.Error())
 	}
+
 	losAngeles = z
 }
+
+const epochDay = 86400
 
 func TestCalculateSun(t *testing.T) {
 	t.Run("PDT", func(t *testing.T) {
 		// This is the same day as in the DST test but subtracted 1 day off,
 		// which was before DST was switched off.
-		ts := time.Unix(1636333967-86400, 0)
+		ts := time.Unix(1636333967-epochDay, 0)
 		ts = ts.In(losAngeles)
 
 		exp := Sun{
@@ -64,7 +71,7 @@ func TestCalculateSun(t *testing.T) {
 	t.Run("PST", func(t *testing.T) {
 		// This is the same day as in the DST test but added 1 day in, which was
 		// after DST was switched off.
-		ts := time.Unix(1636333967+86400, 0)
+		ts := time.Unix(1636333967+epochDay, 0)
 		ts = ts.In(losAngeles)
 
 		exp := Sun{
@@ -93,6 +100,7 @@ func timeIn(t *testing.T, ts time.Time, clock string) time.Time {
 
 func assertSun(t *testing.T, ts time.Time, exp Sun) {
 	sun := CalculateSun(ts, latitude)
+	t.Log("sun =", sun)
 
 	assertTime(t, time.Second, exp.Dawn, sun.Dawn)
 	assertTime(t, time.Second, exp.Sunrise, sun.Sunrise)
@@ -123,4 +131,124 @@ func TestDaysInYear(t *testing.T) {
 	// non-leap
 	days = daysInYear(time.Date(2021, time.January, 1, 0, 0, 0, 0, time.UTC))
 	assert("2021", 365)
+}
+
+func TestTimeWithSeconds(t *testing.T) {
+	assert := func(t *testing.T, ts time.Time, h, m, s int) {
+		t.Helper()
+		hh, mm, ss := ts.Clock()
+		if hh != h || mm != m || ss != s {
+			t.Errorf("expected %d:%d:%d, got %d:%d:%d", h, m, s, hh, mm, ss)
+		}
+	}
+
+	t.Run("PDT", func(t *testing.T) {
+		ts := time.Unix(1636333967-epochDay, 0)
+		ts = ts.In(losAngeles)
+		ts = timeWithSeconds(ts, 1)
+		assert(t, ts, 00, 00, 01)
+	})
+
+	t.Run("PST", func(t *testing.T) {
+		ts := time.Unix(1636333967+epochDay, 0)
+		ts = ts.In(losAngeles)
+		ts = timeWithSeconds(ts, 1)
+		assert(t, ts, 00, 00, 01)
+	})
+
+	t.Run("DST", func(t *testing.T) {
+		ts := time.Unix(1636333967, 0)
+		ts = ts.In(losAngeles)
+		ts = timeWithSeconds(ts, 1)
+		assert(t, ts, 01, 00, 01)
+	})
+}
+
+func TestCalcCondition(t *testing.T) {
+	asserter := func(t *testing.T, expect SunCondition) func(f1, f2 float64) {
+		return func(f1, f2 float64) {
+			t.Helper()
+			got := calcCondition(f1, f2)
+			t.Logf("lat %3.0f, decl %3.0f: %s", f1, f2, got)
+			if expect != got {
+				t.Errorf("expected %s, got %s", expect, got)
+			}
+		}
+	}
+
+	t.Run("midnight sun", func(t *testing.T) {
+		assert := asserter(t, MidnightSun)
+
+		assert(-math.NaN(), -math.NaN())
+		assert(-math.NaN(), -1)
+		assert(-1, -math.NaN())
+
+		assert(math.NaN(), math.NaN())
+		assert(math.NaN(), 1)
+		assert(1, math.NaN())
+	})
+
+	t.Run("polar night sun", func(t *testing.T) {
+		assert := asserter(t, PolarNightSun)
+
+		assert(-math.NaN(), math.NaN())
+		assert(-math.NaN(), 1)
+		assert(-1, math.NaN())
+
+		assert(math.NaN(), -math.NaN())
+		assert(math.NaN(), -1)
+		assert(1, -math.NaN())
+	})
+}
+
+func TestCalculateWhitepoint(t *testing.T) {
+	eq := func(c1, c2 [3]float64) bool {
+		for i := range c1 {
+			if !feq(c1[i], c2[i]) {
+				return false
+			}
+		}
+		return true
+	}
+
+	type test struct {
+		temperature float64
+		whitepoint  [3]float64
+	}
+
+	var tests = []test{
+		{50000, rgb(0.59187, 0.727766, 1)},
+		{25000, rgb(0.59187, 0.727766, 1)},
+		{6500, rgb(1, 1, 1)},
+		{4000, rgb(1, 0.823415, 0.597612)},
+		{2500, rgb(1, 0.617219, 0.251946)},
+		{1667, rgb(1, 0.462962, 0)},
+		{0, rgb(1, 0.462962, 0)},
+	}
+
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("%.0fK", test.temperature), func(t *testing.T) {
+			r, g, b := CalculateWhitepoint(test.temperature)
+			if c := rgb(r, g, b); !eq(c, test.whitepoint) {
+				t.Errorf("%.0fK: expected %v, got %v", test.temperature, test.whitepoint, c)
+			}
+		})
+	}
+
+	t.Run("0K-50000K", func(t *testing.T) {
+		// Ensure that this will never panic.
+		for f := 0.0; f < 50000; f++ {
+			CalculateWhitepoint(f)
+		}
+	})
+}
+
+func rgb(r, g, b float64) [3]float64 {
+	return [3]float64{r, g, b}
+}
+
+// feq compares 2 floats up to the 5th decimal place.
+func feq(f1, f2 float64) bool {
+	const accuracy = 1e-5
+	return math.Abs(f1-f2) <= accuracy
 }

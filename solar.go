@@ -20,7 +20,7 @@ const (
 func degrees(rad float64) float64 { return rad * 180 / math.Pi }
 func radians(deg float64) float64 { return deg * math.Pi / 180 }
 
-// SunCondition describes the conditioon of the Sun.
+// SunCondition describes the condition of the Sun.
 type SunCondition uint8
 
 const (
@@ -52,6 +52,8 @@ type Sun struct {
 	Sunset  time.Time
 	Dusk    time.Time
 
+	// Condition determines the validity of the above times. The times are only
+	// all valid if the condition is normal (NormalSun).
 	Condition SunCondition
 }
 
@@ -120,7 +122,14 @@ func hourAngleToSecondsOffset(hourAngle, eqtime float64) float64 {
 	return degrees((4.0*math.Pi - 4*hourAngle - eqtime) * 60)
 }
 
+// timeWithSeconds converts the given seconds offset to a new time instant
+// starting from the start of the same day. If secs is NaN, then time.Time is
+// zero.
 func timeWithSeconds(t time.Time, secs float64) time.Time {
+	if math.IsNaN(secs) {
+		return time.Time{}
+	}
+
 	s, ns := math.Modf(secs)
 
 	// Calculate the offset from t to get the time the day started relative to
@@ -173,4 +182,153 @@ func CalculateSun(t time.Time, latitudeDeg float64) Sun {
 	}
 
 	return sun
+}
+
+func throwf(f string, v ...interface{}) {
+	panic(fmt.Sprintf(f, v...))
+}
+
+// illuminantD, or daylight locus, is a "standard illuminant" used to describe
+// natural daylight. It is on this locus that D65, the whitepoint used by most
+// monitors and assumed by wlsunset, is defined.
+//
+// This approximation is strictly speaking only well-defined between 4000K and
+// 25000K, but we stretch it a bit further down for transition purposes.
+//
+// The function will panic if temp is outside the range [2500, 25000] in
+// interval notation. Note that CalculateWhitepoint does its own clamping
+// already.
+func illuminantD(temp float64) (x, y float64) {
+	// https://en.wikipedia.org/wiki/Standard_illuminant#Illuminant_series_D
+	if temp >= 2500 && temp <= 7000 {
+		x = 0.244063 +
+			0.09911e3/temp +
+			2.9678e6/math.Pow(temp, 2) -
+			4.6070e9/math.Pow(temp, 3)
+	} else if temp > 7000 && temp <= 25000 {
+		x = 0.237040 +
+			0.24748e3/temp +
+			1.9018e6/math.Pow(temp, 2) -
+			2.0064e9/math.Pow(temp, 3)
+	} else {
+		throwf("unreachable: temp %f out of range [2500, 25000]", temp)
+	}
+
+	y = (-3 * math.Pow(x, 2)) + (2.870 * x) - 0.275
+	return
+}
+
+// planckianLocus, or black body locus, describes the color of a black body at a
+// certain temperatures. This is not entirely equivalent to daylight due to
+// atmospheric effects.
+//
+// This approximation is only valid from 1667K to 25000K. The function will
+// panic if the given temperature is outside that range.
+func planckianLocus(temp float64) (x, y float64) {
+	// https://en.wikipedia.org/wiki/Planckian_locus#Approximation
+	if temp >= 1667 && temp <= 4000 {
+		x = -0.2661239e9/math.Pow(temp, 3) -
+			0.2343589e6/math.Pow(temp, 2) +
+			0.8776956e3/temp +
+			0.179910
+		if temp <= 2222 {
+			y = -1.1064814*math.Pow(x, 3) -
+				1.34811020*math.Pow(x, 2) +
+				2.18555832*x -
+				0.20219683
+		} else {
+			y = -0.9549476*math.Pow(x, 3) -
+				1.37418593*math.Pow(x, 2) +
+				2.09137015*x -
+				0.16748867
+		}
+	} else if temp > 4000 && temp < 25000 {
+		// This codepath is never hit.
+		x = -3.0258469e9/math.Pow(temp, 3) +
+			2.1070379e6/math.Pow(temp, 2) +
+			0.2226347e3/temp +
+			0.240390
+		y = 3.0817580*math.Pow(x, 3) -
+			5.87338670*math.Pow(x, 2) +
+			3.75112997*x -
+			0.37001483
+	} else {
+		throwf("unreachable: temp %f out of range [1667, 25000]", temp)
+	}
+	return
+}
+
+func srgbGamma(value, gamma float64) float64 {
+	// https://en.wikipedia.org/wiki/SRGB
+	if value <= 0.0031308 {
+		return 12.92 * value
+	} else {
+		return math.Pow(1.055*value, 1.0/gamma) - 0.055
+	}
+}
+
+// clamp clamps the given value between [0.0, 1.0].
+func clamp(value float64) float64 {
+	switch {
+	case value > 1.0:
+		return 1.0
+	case value < 0.0:
+		return 0.0
+	}
+	return value
+}
+
+func xyzToSRGB(x, y, z float64) (r, g, b float64) {
+	// http://www.brucelindbloom.com/index.html?Eqn_RGB_XYZ_Matrix.html
+	r = srgbGamma(clamp((3.2404542*x)-(1.5371385*y)-(0.4985314*z)), 2.2)
+	g = srgbGamma(clamp((-0.9692660*x)+(1.8760108*y)+(0.0415560*z)), 2.2)
+	b = srgbGamma(clamp((0.0556434*x)-(0.2040259*y)+(1.0572252*z)), 2.2)
+	return
+}
+
+func srgbNormalize(r, g, b float64) (r1, g1, b1 float64) {
+	maxw := math.Max(r, math.Max(g, b))
+	r /= maxw
+	g /= maxw
+	b /= maxw
+	return r, g, b
+}
+
+// CalculateWhitepoint calculates the whitepoint for the red, green and blue
+// channels given the color temperature. The valid range for temperature is from
+// 1667K to 25000K. Giving a value outside that range will make the function
+// clamp that value. The normal white temperature is 6500K.
+func CalculateWhitepoint(temp float64) (rw, gw, bw float64) {
+	if temp == 6500 {
+		rw = 1
+		gw = 1
+		bw = 1
+		return
+	}
+
+	x, y := 1.0, 1.0
+
+	switch {
+	case temp >= 25000:
+		x, y = illuminantD(25000)
+	case temp >= 4000:
+		x, y = illuminantD(temp)
+	case temp >= 2500:
+		x1, y1 := illuminantD(temp)
+		x2, y2 := planckianLocus(temp)
+		factor := (4000 - temp) / 1500
+		sinefactor := (math.Cos(math.Pi*factor) + 1.0) / 2.0
+		x = x1*sinefactor + x2*(1.0-sinefactor)
+		y = y1*sinefactor + y2*(1.0-sinefactor)
+	case temp >= 1667:
+		x, y = planckianLocus(temp)
+	default:
+		x, y = planckianLocus(1667)
+	}
+
+	z := 1.0 - x - y
+
+	rw, gw, bw = xyzToSRGB(x, y, z)
+	rw, gw, bw = srgbNormalize(rw, gw, bw)
+	return
 }
