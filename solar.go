@@ -71,6 +71,86 @@ func sclock(t time.Time) string {
 	return t.Format(sclockf)
 }
 
+// Temperature is the type for the color temperature in Kelvin.
+type Temperature float64
+
+const (
+	DefaultLowTemperature  Temperature = 4000 // K
+	DefaultHighTemperature Temperature = 6500 // K
+)
+
+// CurrentTemperature calls CalculateTemperature with time.Now().
+func CurrentTemperature(lat, long float64, lo, hi Temperature) Temperature {
+	return CalculateTemperature(time.Now(), lat, long, lo, hi)
+}
+
+// CalculateTemperature calculates the color temperature for the given time. The
+// given latitude must be in degrees. The given lo, hi values determine the
+// minimum and maximum temperatures.
+func CalculateTemperature(t time.Time, lat, long float64, lo, hi Temperature) Temperature {
+	current := CalculateSun(t, lat, long)
+
+	switch current.Condition {
+	case NormalSun:
+		return calcTempNormal(t, current, lo, hi)
+	case MidnightSun:
+		// Need yesterday's sun condition to determine if we should transition
+		// from a normal sun to a midnight sun (always daytime).
+		yesterday := CalculateSun(yesterday(t), lat, long)
+		if yesterday.Condition == NormalSun && t.Before(current.Sunrise) {
+			return calcTempNormal(t, current, lo, hi)
+		}
+		// Yesterday was not normal sun, so probably polar night or midnight.
+		// Keep high.
+		return hi
+	case PolarNightSun:
+		// wlsunset code directly transitions this to low.
+		return lo
+	default:
+		panic("unreachable: unknown sun condition " + current.Condition.String())
+	}
+}
+
+// // NextTransitionTime calculates the next time instant that the color
+// // transitioning will begin.
+// func NextTransitionTime(t time.Time, lat, long float64) time.Time {
+// 	current := CalculateSun(t, lat, long)
+// }
+
+func calcTempNormal(t time.Time, sun Sun, lo, hi Temperature) Temperature {
+	switch {
+	case t.Before(sun.Dawn):
+		return lo
+	case t.Before(sun.Sunrise):
+		return interpTemp(t, sun.Dawn, sun.Sunrise, lo, hi)
+	case t.Before(sun.Sunset):
+		return hi
+	case t.Before(sun.Dusk):
+		return interpTemp(t, sun.Sunset, sun.Dusk, hi, lo)
+	default:
+		return lo
+	}
+}
+
+// interpTemp interpolates the temperature to the given time instant and time
+// range.
+func interpTemp(t, start, stop time.Time, Tstart, Tstop Temperature) Temperature {
+	if Tstart == Tstop {
+		return Tstop
+	}
+
+	timePos := float64(t.Sub(start)) / float64(stop.Sub(start))
+	timePos = clamp(timePos)
+
+	tempPos := float64(Tstop-Tstart) * timePos
+	return Tstart + Temperature(tempPos)
+}
+
+// yesterday returns the same time but yesterday (24 hours ago).
+func yesterday(t time.Time) time.Time {
+	return t.Add(-24 * time.Hour)
+}
+
 func daysInYear(t time.Time) int {
 	// Get the January 1st time for the next year, then subtract 1ns. That'll
 	// take us back to right before New Year, which is the final day of the
@@ -122,16 +202,40 @@ func hourAngleToSecondsOffset(hourAngle, eqtime float64) float64 {
 	return degrees((4.0*math.Pi - 4*hourAngle - eqtime) * 60)
 }
 
-// timeWithSeconds converts the given seconds offset to a new time instant
-// starting from the start of the same day. If secs is NaN, then time.Time is
-// zero.
-func timeWithSeconds(t time.Time, secs float64) time.Time {
-	if math.IsNaN(secs) {
-		return time.Time{}
-	}
+// longitudeTimeOffset calculates the longitude offset in seconds.
+func longitudeTimeOffset(long float64) float64 {
+	const halfDay = 43200
+	return long * halfDay / math.Pi
+}
 
-	s, ns := math.Modf(secs)
+// timeTruncateDayLongitude calls timeTruncateDay on the given time instant,
+// then adds the longitude time offset.
+func timeTruncateDayLongitude(t time.Time, long float64) time.Time {
+	offset := longitudeTimeOffset(long)
+	// Round the offset to an hour. The offset is, for some reason, longer than
+	// an hour. For example, given the longitude of Los Angeles, we get a ~3.5
+	// hours offset shifting back, which is unusual. Doing it this way gives us
+	// a much more accurate result, however.
+	//
+	// For example, before giving the longitude, the calculated sunrise time was
+	// 6:40AM in the tests, while Google reported 6:19AM. With the right
+	// longitude, the calculated time is 6:10AM, which is much closer.
+	//
+	// The unexpected offset could be attributed to both the halfDay constant in
+	// wlsunset and the fact that time.Time already includes timezone
+	// information, while time_t operates on Unix epoch (which doesn't have a
+	// timezone).
+	offset = math.Mod(offset, 1*60*60)
 
+	t = timeTruncateDay(t)
+	t = timeAddSeconds(t, offset)
+
+	return t
+}
+
+// timeTruncateDay truncates the given time to the start of day using the
+// current time instant's timezone.
+func timeTruncateDay(t time.Time) time.Time {
 	// Calculate the offset from t to get the time the day started relative to
 	// this current timezone independently of DST.
 	toffset := 0 +
@@ -141,9 +245,19 @@ func timeWithSeconds(t time.Time, secs float64) time.Time {
 		time.Duration(t.Nanosecond())
 
 	t = t.Add(-toffset)
+	return t
+}
+
+// timeAddSeconds adds the given seconds in float64 to the given time instant.
+// If secs is NaN, then t is returned.
+func timeAddSeconds(t time.Time, secs float64) time.Time {
+	if math.IsNaN(secs) {
+		return time.Time{}
+	}
+
+	s, ns := math.Modf(secs)
 	t = t.Add(time.Duration(s) * time.Second)
 	t = t.Add(time.Duration(ns * float64(time.Second)))
-
 	return t
 }
 
@@ -157,9 +271,17 @@ func calcCondition(latitudeRad, sunDeclination float64) SunCondition {
 }
 
 // CalculateSun calculates the times for various positions of the sun as well as
-// its condition at the given time and latitude.
-func CalculateSun(t time.Time, latitudeDeg float64) Sun {
-	latitudeRad := radians(latitudeDeg)
+// its condition at the given time and latitude. The given latitude and
+// longitude must be in degrees.
+//
+// The given longitude is only used to improve the accuracy of the result. The
+// values of the given longitude will vary the results by +-1 hour.
+//
+// If the returned Sun data has a non-normal condition, that is, if it's
+// midnight sun or polar night sun, then some of the time values may be zero.
+func CalculateSun(t time.Time, lat, long float64) Sun {
+	t = timeTruncateDayLongitude(t, long)
+	latitudeRad := radians(lat)
 
 	orbitAngle := dateOrbitAngle(t)
 	decl := sunDeclination(orbitAngle)
@@ -169,10 +291,10 @@ func CalculateSun(t time.Time, latitudeDeg float64) Sun {
 	haDaylight := sunHourAngle(latitudeRad, decl, endTwilight)
 
 	sun := Sun{
-		Dawn:    timeWithSeconds(t, hourAngleToSecondsOffset(+math.Abs(haTwilight), eqtime)),
-		Dusk:    timeWithSeconds(t, hourAngleToSecondsOffset(-math.Abs(haTwilight), eqtime)),
-		Sunrise: timeWithSeconds(t, hourAngleToSecondsOffset(+math.Abs(haDaylight), eqtime)),
-		Sunset:  timeWithSeconds(t, hourAngleToSecondsOffset(-math.Abs(haDaylight), eqtime)),
+		Dawn:    timeAddSeconds(t, hourAngleToSecondsOffset(+math.Abs(haTwilight), eqtime)),
+		Dusk:    timeAddSeconds(t, hourAngleToSecondsOffset(-math.Abs(haTwilight), eqtime)),
+		Sunrise: timeAddSeconds(t, hourAngleToSecondsOffset(+math.Abs(haDaylight), eqtime)),
+		Sunset:  timeAddSeconds(t, hourAngleToSecondsOffset(-math.Abs(haDaylight), eqtime)),
 	}
 
 	if math.IsNaN(haTwilight) || math.IsNaN(haDaylight) {
@@ -295,10 +417,15 @@ func srgbNormalize(r, g, b float64) (r1, g1, b1 float64) {
 }
 
 // CalculateWhitepoint calculates the whitepoint for the red, green and blue
-// channels given the color temperature. The valid range for temperature is from
-// 1667K to 25000K. Giving a value outside that range will make the function
-// clamp that value. The normal white temperature is 6500K.
-func CalculateWhitepoint(temp float64) (rw, gw, bw float64) {
+// channels given the color temperature.
+//
+// The valid range for temperature is from 1667K to 25000K. Giving a value
+// outside that range will make the function clamp that value. The normal white
+// temperature is 6500K.
+//
+// The returned red, green and blue values are within [0.0, 1.0] in interval
+// notation. A temperature value of 6500K will return (1.0, 1.0, 1.0) for white.
+func CalculateWhitepoint(temp Temperature) (rw, gw, bw float64) {
 	if temp == 6500 {
 		rw = 1
 		gw = 1
@@ -312,16 +439,16 @@ func CalculateWhitepoint(temp float64) (rw, gw, bw float64) {
 	case temp >= 25000:
 		x, y = illuminantD(25000)
 	case temp >= 4000:
-		x, y = illuminantD(temp)
+		x, y = illuminantD(float64(temp))
 	case temp >= 2500:
-		x1, y1 := illuminantD(temp)
-		x2, y2 := planckianLocus(temp)
-		factor := (4000 - temp) / 1500
+		x1, y1 := illuminantD(float64(temp))
+		x2, y2 := planckianLocus(float64(temp))
+		factor := float64((4000 - temp) / 1500)
 		sinefactor := (math.Cos(math.Pi*factor) + 1.0) / 2.0
 		x = x1*sinefactor + x2*(1.0-sinefactor)
 		y = y1*sinefactor + y2*(1.0-sinefactor)
 	case temp >= 1667:
-		x, y = planckianLocus(temp)
+		x, y = planckianLocus(float64(temp))
 	default:
 		x, y = planckianLocus(1667)
 	}

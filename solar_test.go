@@ -36,10 +36,10 @@ func TestCalculateSun(t *testing.T) {
 		ts = ts.In(losAngeles)
 
 		exp := Sun{
-			Dawn:    timeIn(t, ts, "05:56:52"),
-			Sunrise: timeIn(t, ts, "06:39:05"),
-			Sunset:  timeIn(t, ts, "16:48:33"),
-			Dusk:    timeIn(t, ts, "17:30:47"),
+			Dawn:    timeIn(t, ts, "05:26:25"),
+			Sunrise: timeIn(t, ts, "06:08:41"),
+			Sunset:  timeIn(t, ts, "16:19:56"),
+			Dusk:    timeIn(t, ts, "17:02:12"),
 		}
 
 		assertSun(t, ts, exp)
@@ -59,10 +59,10 @@ func TestCalculateSun(t *testing.T) {
 		// time is 4:54PM. The results of these are taken from the code, but
 		// they're very close to what Google has.
 		exp := Sun{
-			Dawn:    timeIn(t, ts, "05:57:52"),
-			Sunrise: timeIn(t, ts, "06:40:03"),
-			Sunset:  timeIn(t, ts, "16:47:45"),
-			Dusk:    timeIn(t, ts, "17:29:56"),
+			Dawn:    timeIn(t, ts, "05:28:25"),
+			Sunrise: timeIn(t, ts, "06:10:36"),
+			Sunset:  timeIn(t, ts, "16:18:18"),
+			Dusk:    timeIn(t, ts, "17:00:30"),
 		}
 
 		assertSun(t, ts, exp)
@@ -75,10 +75,10 @@ func TestCalculateSun(t *testing.T) {
 		ts = ts.In(losAngeles)
 
 		exp := Sun{
-			Dawn:    timeIn(t, ts, "05:58:52"),
-			Sunrise: timeIn(t, ts, "06:41:01"),
-			Sunset:  timeIn(t, ts, "16:46:58"),
-			Dusk:    timeIn(t, ts, "17:29:07"),
+			Dawn:    timeIn(t, ts, "05:28:25"),
+			Sunrise: timeIn(t, ts, "06:10:36"),
+			Sunset:  timeIn(t, ts, "16:18:18"),
+			Dusk:    timeIn(t, ts, "17:00:30"),
 		}
 
 		assertSun(t, ts, exp)
@@ -99,20 +99,20 @@ func timeIn(t *testing.T, ts time.Time, clock string) time.Time {
 }
 
 func assertSun(t *testing.T, ts time.Time, exp Sun) {
-	sun := CalculateSun(ts, latitude)
+	sun := CalculateSun(ts, latitude, longitude)
 	t.Log("sun =", sun)
 
-	assertTime(t, time.Second, exp.Dawn, sun.Dawn)
-	assertTime(t, time.Second, exp.Sunrise, sun.Sunrise)
-	assertTime(t, time.Second, exp.Sunset, sun.Sunset)
-	assertTime(t, time.Second, exp.Dusk, sun.Dusk)
+	assertTime(t, "dawn", time.Second, exp.Dawn, sun.Dawn)
+	assertTime(t, "rise", time.Second, exp.Sunrise, sun.Sunrise)
+	assertTime(t, "set ", time.Second, exp.Sunset, sun.Sunset)
+	assertTime(t, "dusk", time.Second, exp.Dusk, sun.Dusk)
 }
 
-func assertTime(t *testing.T, trunc time.Duration, exp, got time.Time) {
+func assertTime(t *testing.T, name string, trunc time.Duration, exp, got time.Time) {
 	exp = exp.Truncate(trunc)
 	got = got.Truncate(trunc)
 	if !exp.Equal(got) {
-		t.Errorf("expected %s != got %s", exp, got)
+		t.Errorf("%s: expected %s, got %s", name, exp, got)
 	}
 }
 
@@ -145,21 +145,24 @@ func TestTimeWithSeconds(t *testing.T) {
 	t.Run("PDT", func(t *testing.T) {
 		ts := time.Unix(1636333967-epochDay, 0)
 		ts = ts.In(losAngeles)
-		ts = timeWithSeconds(ts, 1)
+		ts = timeTruncateDay(ts)
+		ts = timeAddSeconds(ts, 1)
 		assert(t, ts, 00, 00, 01)
 	})
 
 	t.Run("PST", func(t *testing.T) {
 		ts := time.Unix(1636333967+epochDay, 0)
 		ts = ts.In(losAngeles)
-		ts = timeWithSeconds(ts, 1)
+		ts = timeTruncateDay(ts)
+		ts = timeAddSeconds(ts, 1)
 		assert(t, ts, 00, 00, 01)
 	})
 
 	t.Run("DST", func(t *testing.T) {
 		ts := time.Unix(1636333967, 0)
 		ts = ts.In(losAngeles)
-		ts = timeWithSeconds(ts, 1)
+		ts = timeTruncateDay(ts)
+		ts = timeAddSeconds(ts, 1)
 		assert(t, ts, 01, 00, 01)
 	})
 }
@@ -212,7 +215,7 @@ func TestCalculateWhitepoint(t *testing.T) {
 	}
 
 	type test struct {
-		temperature float64
+		temperature Temperature
 		whitepoint  [3]float64
 	}
 
@@ -237,7 +240,7 @@ func TestCalculateWhitepoint(t *testing.T) {
 
 	t.Run("0K-50000K", func(t *testing.T) {
 		// Ensure that this will never panic.
-		for f := 0.0; f < 50000; f++ {
+		for f := Temperature(0); f < 50000; f++ {
 			CalculateWhitepoint(f)
 		}
 	})
