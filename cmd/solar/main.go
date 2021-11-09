@@ -24,8 +24,8 @@ var (
 func main() {
 	flag.Float64Var(&latitude, "lat", latitude, "latitude")
 	flag.Float64Var(&longitude, "long", longitude, "longitude, optional")
-	flag.Float64Var(&lowTemp, "lo", lowTemp, "lowest temperature")
-	flag.Float64Var(&highTemp, "hi", highTemp, "highest temperature")
+	flag.Float64Var(&lowTemp, "lo", lowTemp, "lowest temperature in Kelvin")
+	flag.Float64Var(&highTemp, "hi", highTemp, "highest temperature in Kelvin")
 	flag.StringVar(&address, "a", address, "address to geoguess using geocode.xyz, uses internet")
 	flag.StringVar(&tformat, "t", tformat, "time format")
 	flag.Parse()
