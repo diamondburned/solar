@@ -167,6 +167,18 @@ func TestTimeWithSeconds(t *testing.T) {
 	})
 }
 
+func TestTimeLongitude(t *testing.T) {
+	ts := time.Unix(1636333967-epochDay, 0)
+	ts = ts.In(losAngeles)
+
+	// -120 is pretty close. 34.1 N 120 W takes us to near the coast of Los
+	// Angeles, still within California, which is REALLY close.
+	long := TimeLongitude(ts)
+	if long != -120 {
+		t.Fatalf("unexpected estimated longitude for LA, expected -120, got %.02f", long)
+	}
+}
+
 func TestCalcCondition(t *testing.T) {
 	asserter := func(t *testing.T, expect SunCondition) func(f1, f2 float64) {
 		return func(f1, f2 float64) {

@@ -84,6 +84,9 @@ func CurrentTemperature(lat, long float64, lo, hi Temperature) Temperature {
 	return CalculateTemperature(time.Now(), lat, long, lo, hi)
 }
 
+// WatchCurrentTemperature watches the
+// func WatchCurrentTemperature(lat, long float64, lo, hi Temperature) <-chan Temperature {}
+
 // CalculateTemperature calculates the color temperature for the given time. The
 // given latitude must be in degrees. The given lo, hi values determine the
 // minimum and maximum temperatures.
@@ -206,6 +209,27 @@ func hourAngleToSecondsOffset(hourAngle, eqtime float64) float64 {
 func longitudeTimeOffset(long float64) float64 {
 	const halfDay = 43200
 	return long * halfDay / math.Pi
+}
+
+// LocalLongitude estimates the longitude using the system timezone.
+func LocalLongitude() float64 {
+	return TimeLongitude(time.Now())
+}
+
+// TimeLongitude estimates the longitude from the given time instant. It uses
+// the timezone to estimate.
+func TimeLongitude(t time.Time) float64 {
+	_, offset := t.Zone()
+	if t.IsDST() {
+		// DST sets the clock forward 1 hour, so we shift it back.
+		offset -= 1 * 60 * 60
+	}
+
+	// https://www.timeanddate.com/time/current-number-time-zones.html
+
+	// Offset is in seconds, and the formula needs hour, so we convert it, then
+	// multiply.
+	return float64(offset) / 60 / 60 * 15
 }
 
 // timeTruncateDayLongitude calls timeTruncateDay on the given time instant,
