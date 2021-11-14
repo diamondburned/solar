@@ -65,6 +65,18 @@ func (s Sun) String() string {
 	)
 }
 
+// IsRising returns true if the given time instant is during a sunrise. False is
+// always returned if the condition is not normal sun.
+func (s Sun) IsRising(now time.Time) bool {
+	return s.Condition == NormalSun && now.After(s.Dawn) && now.Before(s.Sunrise)
+}
+
+// IsSetting returns true if the given time instant is during a sunset. False is
+// always returned if the condition is not normal sun.
+func (s Sun) IsSetting(now time.Time) bool {
+	return s.Condition == NormalSun && now.After(s.Sunset) && now.Before(s.Dusk)
+}
+
 const sclockf = "15:04:05"
 
 func sclock(t time.Time) string {
@@ -80,7 +92,7 @@ const (
 )
 
 // CurrentTemperature calls CalculateTemperature with time.Now().
-func CurrentTemperature(lat, long float64, lo, hi Temperature) Temperature {
+func CurrentTemperature(lat, long float64, lo, hi Temperature) (Temperature, Sun) {
 	return CalculateTemperature(time.Now(), lat, long, lo, hi)
 }
 
@@ -90,25 +102,25 @@ func CurrentTemperature(lat, long float64, lo, hi Temperature) Temperature {
 // CalculateTemperature calculates the color temperature for the given time. The
 // given latitude must be in degrees. The given lo, hi values determine the
 // minimum and maximum temperatures.
-func CalculateTemperature(t time.Time, lat, long float64, lo, hi Temperature) Temperature {
+func CalculateTemperature(t time.Time, lat, long float64, lo, hi Temperature) (Temperature, Sun) {
 	current := CalculateSun(t, lat, long)
 
 	switch current.Condition {
 	case NormalSun:
-		return calcTempNormal(t, current, lo, hi)
+		return calcTempNormal(t, current, lo, hi), current
 	case MidnightSun:
 		// Need yesterday's sun condition to determine if we should transition
 		// from a normal sun to a midnight sun (always daytime).
 		yesterday := CalculateSun(yesterday(t), lat, long)
 		if yesterday.Condition == NormalSun && t.Before(current.Sunrise) {
-			return calcTempNormal(t, current, lo, hi)
+			return calcTempNormal(t, current, lo, hi), current
 		}
 		// Yesterday was not normal sun, so probably polar night or midnight.
 		// Keep high.
-		return hi
+		return hi, current
 	case PolarNightSun:
 		// wlsunset code directly transitions this to low.
-		return lo
+		return lo, current
 	default:
 		panic("unreachable: unknown sun condition " + current.Condition.String())
 	}
