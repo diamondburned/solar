@@ -3,6 +3,7 @@
 package solar
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"time"
@@ -30,6 +31,20 @@ const (
 	sunConditionMax
 )
 
+// ParseSunCondition parses the given string into a SunCondition.
+func ParseSunCondition(condition string) (SunCondition, bool) {
+	switch condition {
+	case "normal sun":
+		return NormalSun, true
+	case "midnight sun":
+		return MidnightSun, true
+	case "polar night sun":
+		return PolarNightSun, true
+	default:
+		return 0, false
+	}
+}
+
 // String formats SunCondition into all-lower-cased English strings.
 func (c SunCondition) String() string {
 	switch c {
@@ -42,6 +57,25 @@ func (c SunCondition) String() string {
 	default:
 		return fmt.Sprintf("SunCondition(%d)", c)
 	}
+}
+
+func (c SunCondition) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.String())
+}
+
+func (c *SunCondition) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+
+	var ok bool
+	*c, ok = ParseSunCondition(s)
+	if !ok {
+		return fmt.Errorf("invalid sun condition %q", s)
+	}
+
+	return nil
 }
 
 // Sun describes the times for various positions of the sun. The dates of the
@@ -61,7 +95,7 @@ type Sun struct {
 func (s Sun) String() string {
 	return fmt.Sprintf(
 		"dawn at %s, sunrise at %s, sunset at %s, dusk at %s, condition: %s",
-		sclock(s.Dawn), sclock(s.Sunrise), sclock(s.Sunset), sclock(s.Dusk), s.Condition,
+		ShortTime(s.Dawn), ShortTime(s.Sunrise), ShortTime(s.Sunset), ShortTime(s.Dusk), s.Condition,
 	)
 }
 
@@ -79,7 +113,8 @@ func (s Sun) IsSetting(now time.Time) bool {
 
 const sclockf = "15:04:05"
 
-func sclock(t time.Time) string {
+// ShortTime formats the time into a short string of %H:%M:%S.
+func ShortTime(t time.Time) string {
 	return t.Format(sclockf)
 }
 
