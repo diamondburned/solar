@@ -21,6 +21,7 @@ var (
 	highTemp  = float64(solar.DefaultHighTemperature)
 	tformat   = "15:04:05"
 	tnow      = time.Now().Unix()
+	address   = ""
 	useIPLoc  = false
 	printJSON = false
 )
@@ -31,37 +32,59 @@ func main() {
 	flag.Float64Var(&lowTemp, "lo", lowTemp, "lowest temperature in Kelvin")
 	flag.Float64Var(&highTemp, "hi", highTemp, "highest temperature in Kelvin")
 	flag.StringVar(&tformat, "t", tformat, "time format")
+	flag.StringVar(&address, "a", address, "address to geocode, takes precedence over --lat, --long and --ip")
 	flag.Int64Var(&tnow, "now", tnow, "current time in Unix seconds")
 	flag.BoolVar(&printJSON, "j", printJSON, "print JSON instead of human-readable")
 	flag.BoolVar(&useIPLoc, "ip", useIPLoc, "use IP location instead of coordinates")
 	flag.Parse()
 
 	var geocodeResponse *geocodeResponse
-	if useIPLoc {
-		ip, err := myIP()
-		if err != nil {
-			log.Fatal("cannot get public IP address: ", err)
+	var geocodeResults *GeocodeResults
+
+	if useIPLoc || address != "" {
+		var err error
+		geocodeInput := address
+
+		switch {
+		case useIPLoc:
+			geocodeInput, err = myIP()
+			if err != nil {
+				log.Fatal("cannot get public IP address: ", err)
+			}
+		case address != "":
+			geocodeInput = address
 		}
 
-		geocodeResponse, err = geocode(ip)
+		geocodeResponse, err = geocode(geocodeInput)
 		if err != nil {
 			log.Fatalln("cannot geolocate from public IP:", err)
 		}
 
 		latitude = geocodeResponse.Latitude
 		longitude = geocodeResponse.Longitude
+
+		geocodeResults = &GeocodeResults{
+			City:    geocodeResponse.City,
+			Country: geocodeResponse.Country,
+		}
 	}
 
 	lo := solar.Temperature(lowTemp)
 	hi := solar.Temperature(highTemp)
 	temp, sun := solar.CalculateTemperature(time.Unix(tnow, 0), latitude, longitude, lo, hi)
 
-	r := results{
+	r := Results{
 		Latitude:    latitude,
 		Longitude:   longitude,
-		Geocode:     geocodeResponse,
+		Geocode:     geocodeResults,
 		Temperature: temp,
-		Sun:         sun,
+		Sun: SunResults{
+			Dawn:      sun.Dawn,
+			Sunrise:   sun.Sunrise,
+			Sunset:    sun.Sunset,
+			Dusk:      sun.Dusk,
+			Condition: sun.Condition.String(),
+		},
 	}
 
 	if printJSON {
@@ -71,15 +94,28 @@ func main() {
 	}
 }
 
-type results struct {
+type Results struct {
 	Latitude    float64           `json:"latitude"`
 	Longitude   float64           `json:"longitude"`
-	Geocode     *geocodeResponse  `json:"geocode,omitempty"`
+	Geocode     *GeocodeResults   `json:"geocode,omitempty"`
 	Temperature solar.Temperature `json:"temperature"`
-	Sun         solar.Sun         `json:"sun"`
+	Sun         SunResults        `json:"sun"`
 }
 
-func (r results) PrintText(w io.Writer) {
+type SunResults struct {
+	Dawn      time.Time `json:"dawn,omitempty"`
+	Sunrise   time.Time `json:"sunrise,omitempty"`
+	Sunset    time.Time `json:"sunset,omitempty"`
+	Dusk      time.Time `json:"dusk,omitempty"`
+	Condition string    `json:"condition"`
+}
+
+type GeocodeResults struct {
+	City    string `json:"city,omitempty"`
+	Country string `json:"country,omitempty"`
+}
+
+func (r Results) PrintText(w io.Writer) {
 	printlnf := func(f string, v ...interface{}) {
 		fmt.Fprintln(w, fmt.Sprintf(f, v...))
 	}
@@ -92,7 +128,7 @@ func (r results) PrintText(w io.Writer) {
 	printlnf("latitude: %g", r.Latitude)
 	printlnf("longitude: %g", r.Longitude)
 	if r.Geocode != nil {
-		printlnf("location: %s, %s", r.Geocode.City, r.Geocode.Region)
+		printlnf("location: %s, %s", r.Geocode.City, r.Geocode.Country)
 	}
 	printlnf("sun condition: %s", r.Sun.Condition)
 	printTime("dawn time", r.Sun.Dawn)
@@ -102,7 +138,7 @@ func (r results) PrintText(w io.Writer) {
 	printlnf("color temperature: %.0fK", r.Temperature)
 }
 
-func (r results) PrintJSON(w io.Writer) {
+func (r Results) PrintJSON(w io.Writer) {
 	e := json.NewEncoder(w)
 	e.SetIndent("", "  ")
 	if err := e.Encode(r); err != nil {
@@ -130,12 +166,10 @@ func myIP() (string, error) {
 }
 
 type geocodeResponse struct {
-	City      string  `json:"city"`
-	Province  string  `json:"prov"`
-	Region    string  `json:"region"`
-	Country   string  `json:"country"`
-	Longitude float64 `json:"longt,string"`
-	Latitude  float64 `json:"latt,string"`
+	City      string
+	Country   string
+	Longitude float64
+	Latitude  float64
 }
 
 func geocode(address string) (*geocodeResponse, error) {
@@ -152,10 +186,30 @@ func geocode(address string) (*geocodeResponse, error) {
 	}
 	defer r.Body.Close()
 
-	var resp geocodeResponse
+	var resp struct {
+		City     string `json:"city,omitempty"`
+		Country  string `json:"country,omitempty"`
+		Standard struct {
+			City    string `json:"city"`
+			Country string `json:"countryname"`
+		} `json:"standard"`
+		Longitude float64 `json:"longt,string"`
+		Latitude  float64 `json:"latt,string"`
+	}
+
 	if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
 		return nil, fmt.Errorf("cannot decode JSON from geocode.xyz: %w", err)
 	}
 
-	return &resp, nil
+	if resp.Standard.Country != "" {
+		resp.City = resp.Standard.City
+		resp.Country = resp.Standard.Country
+	}
+
+	return &geocodeResponse{
+		City:      resp.City,
+		Country:   resp.Country,
+		Longitude: resp.Longitude,
+		Latitude:  resp.Latitude,
+	}, nil
 }
